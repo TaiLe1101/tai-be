@@ -22,7 +22,6 @@ import {
 } from '@nestjs/swagger';
 import { PERMISSIONS } from '~/common/constants/permissions.constant';
 import { RequirePermission } from '~/common/decorators/permissions.decorator';
-import { CurrentUser } from '~/modules/auth/decorators/current-user.decorator';
 import { ResponseApi } from '~/types/response-api.type';
 import { appReleaseMulterOptions } from './app-release-upload';
 import type { AppReleaseFiles } from './app-release-upload';
@@ -120,15 +119,12 @@ export class AppReleasesController {
       appReleaseMulterOptions,
     ),
   )
-  async upload(
-    @UploadedFiles() files: AppReleaseFiles,
-    @CurrentUser('id') userId: number,
-  ) {
+  async upload(@UploadedFiles() files: AppReleaseFiles) {
     return new ResponseApi(
       HttpStatus.CREATED,
       'UPLOAD_APP_RELEASE_SUCCESS',
       'Tạo bản nháp thành công',
-      await this.releases.upload(files, userId),
+      await this.releases.upload(files),
     );
   }
 
@@ -137,15 +133,12 @@ export class AppReleasesController {
   @HttpCode(HttpStatus.OK)
   // @RequirePermission(PERMISSIONS.APP_RELEASES.PUBLISH)
   @ApiOperation({ summary: 'Phát hành phiên bản lên kênh stable' })
-  async publish(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser('id') userId: number,
-  ) {
+  async publish(@Param('id', ParseIntPipe) id: number) {
     return new ResponseApi(
       HttpStatus.OK,
       'PUBLISH_APP_RELEASE_SUCCESS',
       'Phát hành phiên bản thành công',
-      await this.releases.publish(id, userId),
+      await this.releases.publish(id),
     );
   }
 

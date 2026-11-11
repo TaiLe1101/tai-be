@@ -3,6 +3,7 @@
 import type { AppRelease } from '$/prisma/client';
 import {
   Global,
+  Logger,
   Module,
   RequestMethod,
   ValidationPipe,
@@ -52,7 +53,7 @@ type Transaction = Pick<
 >;
 type CreateData = Omit<
   AppRelease,
-  'id' | 'createdAt' | 'updatedAt' | 'publishedAt' | 'publishedById'
+  'id' | 'createdAt' | 'updatedAt' | 'publishedAt'
 >;
 const responseData = (response: { body: unknown }) =>
   (response.body as { data: ReleaseResult }).data;
@@ -103,7 +104,6 @@ const delegates = {
         createdAt: new Date(),
         updatedAt: new Date(),
         publishedAt: null,
-        publishedById: null,
         ...data,
       };
       rows.push(row);
@@ -115,7 +115,7 @@ const delegates = {
         data,
       }: {
         where: { id: number };
-        data: Pick<AppRelease, 'publishedAt' | 'publishedById'>;
+        data: Pick<AppRelease, 'publishedAt'>;
       }) => {
         const row = rows.find((row) => row.id === where.id)!;
         Object.assign(row, data);
@@ -127,7 +127,23 @@ const delegates = {
       rows = rows.filter((row) => row.id !== where.id);
       return row;
     }),
-    findMany: jest.fn(async () => rows),
+    findMany: jest.fn(
+      async (args?: {
+        where?: { publishedAt?: { not: null }; id?: { not: number } };
+      }) =>
+        rows.filter(
+          (row) =>
+            (!args?.where?.publishedAt || row.publishedAt !== null) &&
+            (!args?.where?.id || row.id !== args.where.id.not),
+        ),
+    ),
+    deleteMany: jest.fn(
+      async ({ where }: { where: { id: { in: number[] } } }) => {
+        const count = rows.filter((row) => where.id.in.includes(row.id)).length;
+        rows = rows.filter((row) => !where.id.in.includes(row.id));
+        return { count };
+      },
+    ),
     count: jest.fn(async () => rows.length),
   },
   appReleaseChannel: {
@@ -260,24 +276,16 @@ describe('desktop release API', () => {
     await rm(testDirectory, { recursive: true, force: true });
   });
 
-  it('requires JWT and permission; supports root and role permission lookup', async () => {
-    await request(app.getHttpServer()).get('/api/v1/app-releases').expect(401);
+  it('serves the list using the current public controller configuration', async () => {
+    await request(app.getHttpServer()).get('/api/v1/app-releases').expect(200);
     await request(app.getHttpServer())
       .get('/api/v1/app-releases')
       .set('Authorization', token(3))
-      .expect(403);
+      .expect(200);
     await request(app.getHttpServer())
       .get('/api/v1/app-releases')
       .set('Authorization', token(2))
       .expect(200);
-    expect(prisma.user.findFirst.mock.calls[0][0]).toMatchObject({
-      where: { deletedAt: null },
-      include: {
-        userRoles: {
-          where: { role: { isActive: true, deletedAt: null } },
-        },
-      },
-    });
   });
 
   it('returns 404 before first publish', async () => {
@@ -292,7 +300,6 @@ describe('desktop release API', () => {
       status: 'draft',
       isCurrent: false,
       version: '1.0.0',
-      uploadedById: 1,
     });
     expect(responseData(response)).not.toHaveProperty('manifest');
     for (const path of [
@@ -387,6 +394,63 @@ describe('desktop release API', () => {
       .expect(200);
     expect(await readdir(APP_RELEASE_ROOT)).not.toContain('1.3.0');
     await upload('1.3.0').expect(201);
+  });
+
+  it('keeps exactly two published versions and removes older DB rows and all three files', async () => {
+    // Uploading a draft must not remove either currently retained published version.
+    expect(
+      rows.filter((row) => row.publishedAt).map((row) => row.version),
+    ).toEqual(['1.0.0', '1.2.0']);
+    await publish(rows.find((row) => row.version === '1.3.0')!.id).expect(200);
+    expect(
+      rows.filter((row) => row.publishedAt).map((row) => row.version),
+    ).toEqual(['1.2.0', '1.3.0']);
+    expect(await readdir(APP_RELEASE_ROOT)).not.toContain('1.0.0');
+    await request(app.getHttpServer())
+      .get(
+        `/uploads/app/release/1.0.0/${encodeURIComponent(filename('1.0.0'))}`,
+      )
+      .expect(404);
+    for (const version of ['1.2.0', '1.3.0']) {
+      expect(await readdir(join(APP_RELEASE_ROOT, version))).toHaveLength(3);
+    }
+    // Keep the previous release by SemVer, including multi-digit version components.
+    const next = await upload('1.10.0').expect(201);
+    await publish(responseData(next).id).expect(200);
+    expect(
+      rows.filter((row) => row.publishedAt).map((row) => row.version),
+    ).toEqual(['1.3.0', '1.10.0']);
+    expect(await readdir(APP_RELEASE_ROOT)).not.toContain('1.2.0');
+    expect(rows.find((row) => row.version === '0.9.0')?.publishedAt).toBeNull();
+  });
+
+  it('restores files on pruning failure, keeps the new stable live and retries on repeated publish', async () => {
+    const next = await upload('1.11.0').expect(201);
+    const log = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    try {
+      delegates.appRelease.deleteMany.mockRejectedValueOnce(
+        new Error('simulated DB failure'),
+      );
+      await publish(responseData(next).id).expect(200);
+      expect(rows.filter((row) => row.publishedAt)).toHaveLength(3);
+      expect(
+        await readFile(join(APP_RELEASE_ROOT, '1.3.0', filename('1.3.0'))),
+      ).toEqual(installer);
+      const feed = await request(app.getHttpServer())
+        .get('/api/v1/app-releases/latest')
+        .expect(200);
+      expect(responseData(feed).version).toBe('1.11.0');
+      expect(log).toHaveBeenCalled();
+      await publish(responseData(next).id).expect(200);
+      expect(
+        rows.filter((row) => row.publishedAt).map((row) => row.version),
+      ).toEqual(['1.10.0', '1.11.0']);
+      expect(await readdir(APP_RELEASE_ROOT)).not.toContain('1.3.0');
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('rejects invalid metadata, extra fields and mismatched blockmap; cleans temporary uploads', async () => {

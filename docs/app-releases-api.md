@@ -78,7 +78,9 @@ Quy tắc:
 
 - Version trùng trả 409; muốn thay file draft thì xóa draft rồi upload lại.
 - Chỉ phát hành version lớn hơn stable hiện tại. Gọi lại publish bản đang stable là idempotent.
-- Không sửa hoặc xóa bản đã phát hành; giữ file cũ cho các máy đang tải và differential update.
+- Sau mỗi lần publish thành công, chỉ giữ **hai bản đã phát hành**: stable hiện tại và bản đã phát hành gần nhất trước đó (so sánh SemVer). Các bản phát hành cũ hơn bị xóa cả bản ghi DB và thư mục chứa ba file.
+- Ví dụ: phát hành `1.0.2` thì giữ `1.0.2` và `1.0.1`, xóa `1.0.0`. Khi mới upload bản nháp hoặc publish thất bại thì không dọn bản cũ. Bản nháp không thuộc giới hạn hai bản phát hành và vẫn được xóa bằng API xóa draft.
+- Không cho phép xóa thủ công bản đã phát hành bằng API xóa draft. Khi dọn tự động, link của bản bị xóa sẽ trả 404; máy đang tải bản đó có thể phải kiểm tra cập nhật lại.
 - Upload/publish kiểm tra SHA-512, size và tên installer trong YAML; publish kiểm tra lại file trên đĩa.
 - Upload không đủ ba file, YAML lỗi, checksum sai: 400. Quá giới hạn file: 413. Thiếu JWT: 401. Thiếu quyền: 403.
 - Chỉ hỗ trợ `files` gồm một installer. Không hỗ trợ prerelease, nhiều kiến trúc, `packages` hoặc manifest có `signature`/`signatures`.
@@ -120,5 +122,10 @@ không serve trực tiếp thư mục release hoặc cache `latest.yml`. Cấu h
 
 Không có transaction phân tán giữa DB và filesystem. Backend dọn file khi request thất bại bình thường;
 nếu process bị kill hoặc mất điện, có thể còn file staging hoặc thư mục version không có bản ghi DB.
-Cần đối chiếu DB trước khi dọn thủ công; không tự động xóa file của bản đã phát hành.
+Cần đối chiếu DB trước khi dọn thủ công.
+Việc dọn bản phát hành cũ chạy sau khi transaction phát hành đã commit, trong một transaction riêng có cùng advisory lock.
+Thư mục cũ được chuyển vào staging trước khi xóa bản ghi; nếu transaction dọn thất bại thì khôi phục thư mục.
+Nếu không dọn được, backend ghi log và vẫn trả kết quả phát hành thành công để stable mới tiếp tục hoạt động;
+gọi lại API publish cho bản đang stable (hoặc publish bản tiếp theo) sẽ thử dọn lại. Nếu chỉ lỗi xóa file staging,
+bản ghi cũ đã bị xóa và file staging còn lại cần được dọn sau khi xử lý lỗi ổ đĩa.
 Backup DB và volume release cùng nhau.

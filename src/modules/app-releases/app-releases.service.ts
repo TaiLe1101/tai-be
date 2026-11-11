@@ -10,7 +10,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, readFile, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { gt } from 'semver';
+import { gt, rcompare, valid } from 'semver';
 import { BaseService } from '~/modules/base/base.service';
 import { PrismaService } from '~/modules/prisma/prisma.service';
 import {
@@ -80,7 +80,7 @@ export class AppReleasesService extends BaseService<
     return this.toResponse(release, channel?.releaseId);
   }
 
-  async upload(files: AppReleaseFiles | undefined, uploadedById: number) {
+  async upload(files: AppReleaseFiles | undefined) {
     const uploaded = Object.values(files ?? {}).flat();
     let ownedDirectory: string | undefined;
     try {
@@ -162,7 +162,7 @@ export class AppReleasesService extends BaseService<
     }
   }
 
-  async publish(id: number, publishedById: number) {
+  async publish(id: number) {
     const candidate = await this.findById(id);
     // Read large artifacts before opening the transaction; mutations recheck the ID under lock.
     await this.verifyFiles(candidate);
@@ -192,7 +192,73 @@ export class AppReleasesService extends BaseService<
       });
       return published;
     });
+    await this.prunePublishedReleases();
     return this.toResponse(release, release.id);
+  }
+
+  private async prunePublishedReleases() {
+    const moved: { source: string; trash: string }[] = [];
+    try {
+      await this.mutate(async (tx) => {
+        // Re-read stable under the lock: another publish may have completed meanwhile.
+        const channel = await tx.appReleaseChannel.findUnique({
+          where: { name: 'stable' },
+        });
+        if (!channel) return;
+        const previous = await tx.appRelease.findMany({
+          where: { publishedAt: { not: null }, id: { not: channel.releaseId } },
+          select: { id: true, version: true },
+        });
+        const obsolete = previous
+          .sort((a, b) => rcompare(a.version, b.version))
+          .slice(1);
+        if (!obsolete.length) return;
+        await mkdir(APP_RELEASE_STAGING, { recursive: true });
+        for (const release of obsolete) {
+          // Only validated, direct version directories may be moved or deleted.
+          if (
+            valid(release.version) !== release.version ||
+            release.version.includes('+')
+          ) {
+            throw new Error(
+              `Version không hợp lệ khi dọn release: ${release.version}`,
+            );
+          }
+          const source = resolve(APP_RELEASE_ROOT, release.version);
+          if (relative(resolve(APP_RELEASE_ROOT), source) !== release.version) {
+            throw new Error('Thư mục release nằm ngoài thư mục cho phép');
+          }
+          const trash = join(APP_RELEASE_STAGING, randomUUID());
+          try {
+            await rename(source, trash);
+            moved.push({ source, trash });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          }
+        }
+        await tx.appRelease.deleteMany({
+          where: { id: { in: obsolete.map((release) => release.id) } },
+        });
+      });
+    } catch (error) {
+      for (const item of moved.reverse()) {
+        try {
+          await rename(item.trash, item.source);
+        } catch (restoreError) {
+          this.logger.error(
+            `Không thể khôi phục release: ${item.source}`,
+            restoreError,
+          );
+        }
+      }
+      // Publication already committed. Preserve the live feed and retry on the next publish.
+      this.logger.error(
+        'Đã phát hành nhưng chưa dọn được các phiên bản cũ; sẽ thử lại khi publish',
+        error,
+      );
+      return;
+    }
+    await Promise.all(moved.map((item) => this.cleanup(item.trash)));
   }
 
   async deleteDraft(id: number) {
