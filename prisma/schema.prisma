@@ -35,15 +35,6 @@ model User {
   phoneNumber String?   @unique @map("phone_number")
   dateOfBirth DateTime? @map("date_of_birth")
 
-  departmentId Int?        @map("department_id")
-  department   Department? @relation(fields: [departmentId], references: [id])
-
-  positionId Int?      @map("position_id")
-  position   Position? @relation(fields: [positionId], references: [id])
-
-  genderId Int    @map("gender_id")
-  gender   Gender @relation(fields: [genderId], references: [id])
-
   userRoles UserRole[]
 
   @@index([username])
@@ -107,70 +98,4 @@ model RolePermission {
 
   @@id([roleId, permissionId])
   @@map("role_permissions")
-}
-
-model Department {
-  id        Int       @id @default(autoincrement())
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-  isActive  Boolean   @default(true) @map("is_active")
-
-  code  String @unique
-  name  String
-  users User[]
-
-  @@map("departments")
-}
-
-model Position {
-  id        Int       @id @default(autoincrement())
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-  isActive  Boolean   @default(true) @map("is_active")
-
-  code  String @unique
-  name  String
-  users User[]
-
-  @@index([code])
-  @@map("positions")
-}
-
-// === COMMON ===
-
-// Bảng giới tính
-model Gender {
-  id        Int       @id @default(autoincrement())
-  createdAt DateTime  @default(now()) @map("created_at")
-  updatedAt DateTime  @updatedAt @map("updated_at")
-  deletedAt DateTime? @map("deleted_at")
-  isActive  Boolean   @default(true) @map("is_active")
-
-  code String @unique
-  name String
-
-  users User[]
-
-  @@index([code])
-  @@map("genders")
-}
-
-// Bảng nhật ký đăng nhập của người dùng
-model UserLoginLog {
-  id        Int      @id @default(autoincrement())
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  username      String?
-  ipAddress     String      @map("ip_address") @db.VarChar(45)
-  userAgent     String?     @map("user_agent")
-  device        String?
-  status        LoginStatus @default(SUCCESS)
-  failureReason String?     @map("failure_reason")
-
-  @@index([ipAddress])
-  @@index([createdAt])
-  @@map("user_login_logs")
 }
