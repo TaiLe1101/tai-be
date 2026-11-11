@@ -1,7 +1,8 @@
 import { User } from "$/prisma/browser";
 
 
-export interface CurrentUserType extends User {
+export interface CurrentUserType extends Omit<User, 'password'> {
+    permissions: string[];
 }
 
 declare global {

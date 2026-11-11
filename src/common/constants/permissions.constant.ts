@@ -1,4 +1,10 @@
 export const PERMISSIONS = {
+  APP_RELEASES: {
+    VIEW: 'app_releases:view',
+    UPLOAD: 'app_releases:upload',
+    PUBLISH: 'app_releases:publish',
+    DELETE: 'app_releases:delete',
+  },
   SYSTEM_USERS: {
     VIEW: 'system_users:view',
     CREATE: 'system_users:create',
@@ -30,6 +36,10 @@ type NestedValue<T> =
 export type PermissionCode = NestedValue<typeof PERMISSIONS>;
 
 export const SYSTEM_PERMISSIONS_METADATA = [
+  { code: PERMISSIONS.APP_RELEASES.VIEW, name: 'Xem phiên bản ứng dụng', description: 'Xem danh sách và chi tiết phiên bản desktop app', group: 'Phiên bản ứng dụng' },
+  { code: PERMISSIONS.APP_RELEASES.UPLOAD, name: 'Upload phiên bản ứng dụng', description: 'Upload bộ file để tạo bản nháp desktop app', group: 'Phiên bản ứng dụng' },
+  { code: PERMISSIONS.APP_RELEASES.PUBLISH, name: 'Phát hành phiên bản ứng dụng', description: 'Phát hành phiên bản desktop app lên kênh stable', group: 'Phiên bản ứng dụng' },
+  { code: PERMISSIONS.APP_RELEASES.DELETE, name: 'Xóa bản nháp ứng dụng', description: 'Xóa phiên bản desktop app chưa phát hành', group: 'Phiên bản ứng dụng' },
   // USERS
   {
     code: PERMISSIONS.SYSTEM_USERS.VIEW,

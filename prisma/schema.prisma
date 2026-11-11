@@ -18,7 +18,6 @@ enum LoginStatus {
   FAILED
 }
 
-// Bảng người dùng
 model User {
   id        Int       @id @default(autoincrement())
   createdAt DateTime  @default(now()) @map("created_at")
@@ -41,7 +40,6 @@ model User {
   @@map("users")
 }
 
-// Bảng vai trò
 model Role {
   id        Int       @id @default(autoincrement())
   createdAt DateTime  @default(now()) @map("created_at")
@@ -70,7 +68,6 @@ model UserRole {
   @@map("user_roles")
 }
 
-// Bảng phân quyền
 model Permission {
   id        Int       @id @default(autoincrement())
   createdAt DateTime  @default(now()) @map("created_at")
@@ -98,4 +95,34 @@ model RolePermission {
 
   @@id([roleId, permissionId])
   @@map("role_permissions")
+}
+
+// A release is a draft until publishedAt is set. Published artifacts are immutable.
+model AppRelease {
+  id              Int       @id @default(autoincrement())
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  version         String    @unique
+  installerName   String    @map("installer_name")
+  installerSize   Int       @map("installer_size")
+  installerSha512 String    @map("installer_sha512")
+  blockmapSize    Int       @map("blockmap_size")
+  blockmapSha512  String    @map("blockmap_sha512")
+  // Manifest returned by the stable feed; URLs point to immutable versioned files.
+  manifest        String
+  publishedAt     DateTime? @map("published_at")
+
+  channel AppReleaseChannel?
+
+  @@index([createdAt])
+  @@map("app_releases")
+}
+
+// One stable pointer, updated in the same DB transaction as publication metadata.
+model AppReleaseChannel {
+  name      String     @id
+  releaseId Int        @unique @map("release_id")
+  release   AppRelease @relation(fields: [releaseId], references: [id], onDelete: Restrict)
+
+  @@map("app_release_channels")
 }

@@ -1,4 +1,9 @@
-import { Logger, ValidationPipe, VersioningType } from '@nestjs/common';
+import {
+  Logger,
+  RequestMethod,
+  ValidationPipe,
+  VersioningType,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import * as bodyParser from 'body-parser';
@@ -12,6 +17,7 @@ import {
 } from '@nestjs/swagger';
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { configureUploadsStatic } from '~/common/configs/uploads-static.config';
 import { HttpExceptionFilter } from '~/filters/http-exception.filter';
 import { AppModule } from './app.module';
 
@@ -26,9 +32,7 @@ async function bootstrap() {
   if (!existsSync(uploadsDir)) {
     mkdirSync(uploadsDir, { recursive: true });
   }
-  app.useStaticAssets(uploadsDir, {
-    prefix: '/uploads/',
-  });
+  configureUploadsStatic(app, uploadsDir);
 
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV');
@@ -43,7 +47,11 @@ async function bootstrap() {
   app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
   app.use(bodyParser.raw({ limit: '10mb' }));
 
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', {
+    exclude: [
+      { path: 'uploads/app/release/{*path}', method: RequestMethod.ALL },
+    ],
+  });
 
   app.enableVersioning({
     type: VersioningType.URI,

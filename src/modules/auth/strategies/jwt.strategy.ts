@@ -21,30 +21,45 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload) {
-    console.log(payload)
-    const user = await this.prismaService.user.findFirst(
-      {
-        where: {
-          id: Number(payload.sub.id)
-        }
-      }
-    );
+    const user = await this.prismaService.user.findFirst({
+      where: {
+        id: Number(payload.sub.id),
+        deletedAt: null,
+      },
+      omit: { password: true },
+      include: {
+        userRoles: {
+          where: { role: { isActive: true, deletedAt: null } },
+          include: {
+            role: {
+              include: {
+                rolePermissions: {
+                  where: { permission: { isActive: true, deletedAt: null } },
+                  include: { permission: true },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
 
     if (!user) {
       throw new UnauthorizedException('Người dùng không tồn tại');
     }
 
     if (!user.isActive) {
-      throw new UnauthorizedException(
-        'Tài khoản người dùng bị khóa',
-      );
+      throw new UnauthorizedException('Tài khoản người dùng bị khóa');
     }
 
-    // const permissions: string[] =
-    //   user.role?.permissions?.map((p) => p.permission.code) ?? [];
-
-    // const { role, ...restUser } = user;
-
-    return user;
+    const { userRoles, ...profile } = user;
+    const permissions = [
+      ...new Set(
+        userRoles.flatMap(({ role }) =>
+          role.rolePermissions.map(({ permission }) => permission.code),
+        ),
+      ),
+    ];
+    return { ...profile, permissions };
   }
 }

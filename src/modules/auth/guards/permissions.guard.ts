@@ -29,7 +29,7 @@ export class PermissionsGuard implements CanActivate {
     }
 
     // Bypass quyền nếu là vai trò ADMIN hệ thống
-    if (user.role && user.role === 'ROOT' || user.role === 'DEVELOPER') {
+    if (user.isRoot) {
       return true;
     }
 

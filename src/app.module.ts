@@ -6,6 +6,7 @@ import { PrismaModule } from '~/modules/prisma/prisma.module';
 import { RBACModule } from '~/modules/rbac/rbac.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { RedisModule } from './modules/redis/redis.module';
+import { AppReleasesModule } from './modules/app-releases/app-releases.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { RedisModule } from './modules/redis/redis.module';
     AuthModule,
     RedisModule,
     RBACModule,
+    AppReleasesModule,
   ],
 })
 export class AppModule { }
