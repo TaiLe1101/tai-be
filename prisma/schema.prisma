@@ -1,0 +1,176 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// === ENUM ===
+enum LoginStatus {
+  SUCCESS
+  FAILED
+}
+
+// Bảng người dùng
+model User {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  isActive  Boolean   @default(true) @map("is_active")
+
+  isRoot      Boolean   @default(false) @map("is_root")
+  username    String    @unique
+  password    String
+  avatar      String?
+  firstName   String    @map("first_name")
+  lastName    String    @map("last_name")
+  phoneNumber String?   @unique @map("phone_number")
+  dateOfBirth DateTime? @map("date_of_birth")
+
+  departmentId Int?        @map("department_id")
+  department   Department? @relation(fields: [departmentId], references: [id])
+
+  positionId Int?      @map("position_id")
+  position   Position? @relation(fields: [positionId], references: [id])
+
+  genderId Int    @map("gender_id")
+  gender   Gender @relation(fields: [genderId], references: [id])
+
+  userRoles UserRole[]
+
+  @@index([username])
+  @@map("users")
+}
+
+// Bảng vai trò
+model Role {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  isActive  Boolean   @default(true) @map("is_active")
+
+  code        String  @unique
+  name        String
+  description String?
+
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@map("roles")
+}
+
+model UserRole {
+  userId Int @map("user_id")
+  roleId Int @map("role_id")
+
+  user User @relation(fields: [userId], references: [id])
+  role Role @relation(fields: [roleId], references: [id])
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// Bảng phân quyền
+model Permission {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  isActive  Boolean   @default(true) @map("is_active")
+
+  code        String  @unique
+  name        String
+  description String?
+  group       String
+
+  rolePermissions RolePermission[]
+
+  @@index([code])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       Int @map("role_id")
+  permissionId Int @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model Department {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  isActive  Boolean   @default(true) @map("is_active")
+
+  code  String @unique
+  name  String
+  users User[]
+
+  @@map("departments")
+}
+
+model Position {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  isActive  Boolean   @default(true) @map("is_active")
+
+  code  String @unique
+  name  String
+  users User[]
+
+  @@index([code])
+  @@map("positions")
+}
+
+// === COMMON ===
+
+// Bảng giới tính
+model Gender {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+  isActive  Boolean   @default(true) @map("is_active")
+
+  code String @unique
+  name String
+
+  users User[]
+
+  @@index([code])
+  @@map("genders")
+}
+
+// Bảng nhật ký đăng nhập của người dùng
+model UserLoginLog {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  username      String?
+  ipAddress     String      @map("ip_address") @db.VarChar(45)
+  userAgent     String?     @map("user_agent")
+  device        String?
+  status        LoginStatus @default(SUCCESS)
+  failureReason String?     @map("failure_reason")
+
+  @@index([ipAddress])
+  @@index([createdAt])
+  @@map("user_login_logs")
+}

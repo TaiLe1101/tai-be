@@ -1,17 +1,24 @@
 import { Module } from '@nestjs/common';
-import { ServeStaticModule } from '@nestjs/serve-static';
-import { join } from 'path';
-import { VoiceoverController } from './voiceover/voiceover.controller';
-import { VoiceoverService } from './voiceover/voiceover.service';
+import { ConfigModule } from '@nestjs/config';
+
+import { envSchema } from '~/configs/env.schema';
+import { PrismaModule } from '~/modules/prisma/prisma.module';
+import { RBACModule } from '~/modules/rbac/rbac.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { RedisModule } from './modules/redis/redis.module';
+import { SystemLogsModule } from './modules/system-logs/system-logs.module';
 
 @Module({
   imports: [
-    ServeStaticModule.forRoot({
-      rootPath: join(process.cwd(), 'storage/audio'),
-      serveRoot: '/audio',
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate: (config) => envSchema.parse(config),
     }),
+    PrismaModule,
+    AuthModule,
+    SystemLogsModule,
+    RedisModule,
+    RBACModule,
   ],
-  controllers: [VoiceoverController],
-  providers: [VoiceoverService],
 })
-export class AppModule {}
+export class AppModule { }

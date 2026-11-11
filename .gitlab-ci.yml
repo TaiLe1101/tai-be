@@ -1,0 +1,547 @@
+stages:
+  - deploy
+  - promote
+
+
+# =========================================================
+# CẤU HÌNH DEPLOY HIỆN TẠI
+# =========================================================
+.default_deploy:
+  before_script:
+    - set -e
+    - echo "Current user:"
+    - whoami
+
+
+# =========================================================
+# AUTO CREATE MERGE REQUEST + AUTO MERGE
+#
+# Luồng:
+#   dev     -> staging
+#   staging -> master
+#
+# Stage promote chạy sau stage deploy.
+# Vì vậy:
+# - dev không có job deploy, nên promote ngay.
+# - staging deploy thành công rồi mới promote lên master.
+# - master chỉ deploy production.
+# - external chỉ deploy external.
+# =========================================================
+.auto_promote:
+  stage: promote
+
+  tags:
+    - safe-care-api-runner
+
+  before_script:
+    - set -e
+    - echo "Current user:"
+    - whoami
+    - |
+      if [ -z "${GITLAB_TOKEN:-}" ]; then
+        echo "ERROR: Không tìm thấy biến GITLAB_TOKEN."
+        echo "Hãy tạo token trong project Backend và thêm vào:"
+        echo "Settings -> CI/CD -> Variables"
+        exit 1
+      fi
+
+    - |
+      if ! command -v curl >/dev/null 2>&1; then
+        echo "ERROR: Runner chưa cài curl."
+        exit 1
+      fi
+
+    - |
+      if ! command -v node >/dev/null 2>&1; then
+        echo "ERROR: Runner chưa cài Node.js."
+        exit 1
+      fi
+
+  script:
+    - |
+      set -eu
+
+      echo "================================================="
+      echo "AUTO PROMOTE: ${SOURCE_BRANCH} -> ${TARGET_BRANCH}"
+      echo "================================================="
+
+      MR_API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests"
+
+      echo "Project ID: ${CI_PROJECT_ID}"
+      echo "Source branch: ${SOURCE_BRANCH}"
+      echo "Target branch: ${TARGET_BRANCH}"
+      echo "Pipeline: ${CI_PIPELINE_URL}"
+
+      # =====================================================
+      # 1. TÌM MERGE REQUEST ĐANG MỞ
+      # =====================================================
+      echo "Checking opened merge request..."
+
+      OPENED_MRS_RESPONSE=$(curl \
+        --fail \
+        --silent \
+        --show-error \
+        --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+        --get \
+        --data-urlencode "state=opened" \
+        --data-urlencode "source_branch=${SOURCE_BRANCH}" \
+        --data-urlencode "target_branch=${TARGET_BRANCH}" \
+        "${MR_API_URL}")
+
+      MR_IID=$(printf '%s' "${OPENED_MRS_RESPONSE}" | node -e '
+        let body = "";
+
+        process.stdin.on("data", chunk => {
+          body += chunk;
+        });
+
+        process.stdin.on("end", () => {
+          try {
+            const mergeRequests = JSON.parse(body);
+
+            if (!Array.isArray(mergeRequests)) {
+              console.error("Invalid GitLab API response:");
+              console.error(body);
+              process.exit(1);
+            }
+
+            if (mergeRequests.length === 0) {
+              process.stdout.write("");
+              return;
+            }
+
+            process.stdout.write(String(mergeRequests[0].iid));
+          } catch (error) {
+            console.error("Cannot parse GitLab API response:");
+            console.error(body);
+            process.exit(1);
+          }
+        });
+      ')
+
+      # =====================================================
+      # 2. TẠO MR NẾU CHƯA CÓ
+      # =====================================================
+      if [ -z "${MR_IID}" ]; then
+        echo "No opened MR found."
+        echo "Creating MR ${SOURCE_BRANCH} -> ${TARGET_BRANCH}..."
+
+        CREATE_MR_RESPONSE=$(curl \
+          --fail \
+          --silent \
+          --show-error \
+          --request POST \
+          --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+          --form "source_branch=${SOURCE_BRANCH}" \
+          --form "target_branch=${TARGET_BRANCH}" \
+          --form "title=Auto merge ${SOURCE_BRANCH} into ${TARGET_BRANCH}" \
+          --form "description=Automatically created by Backend GitLab pipeline: ${CI_PIPELINE_URL}" \
+          --form "remove_source_branch=false" \
+          "${MR_API_URL}")
+
+        MR_IID=$(printf '%s' "${CREATE_MR_RESPONSE}" | node -e '
+          let body = "";
+
+          process.stdin.on("data", chunk => {
+            body += chunk;
+          });
+
+          process.stdin.on("end", () => {
+            try {
+              const mergeRequest = JSON.parse(body);
+
+              if (!mergeRequest.iid) {
+                console.error("GitLab did not return MR IID:");
+                console.error(body);
+                process.exit(1);
+              }
+
+              process.stdout.write(String(mergeRequest.iid));
+            } catch (error) {
+              console.error("Cannot parse create MR response:");
+              console.error(body);
+              process.exit(1);
+            }
+          });
+        ')
+
+        echo "Created merge request !${MR_IID}"
+      else
+        echo "Found existing merge request !${MR_IID}"
+      fi
+
+      # GitLab có thể cần một khoảng ngắn để tính trạng thái merge
+      # sau khi MR vừa được tạo.
+      ATTEMPT=1
+      MAX_ATTEMPTS=10
+      MR_RESPONSE=""
+
+      while [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; do
+        echo "Reading MR status, attempt ${ATTEMPT}/${MAX_ATTEMPTS}..."
+
+        MR_RESPONSE=$(curl \
+          --fail \
+          --silent \
+          --show-error \
+          --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+          "${MR_API_URL}/${MR_IID}")
+
+        DETAILED_MERGE_STATUS=$(printf '%s' "${MR_RESPONSE}" | node -e '
+          let body = "";
+
+          process.stdin.on("data", chunk => {
+            body += chunk;
+          });
+
+          process.stdin.on("end", () => {
+            try {
+              const mergeRequest = JSON.parse(body);
+
+              process.stdout.write(
+                String(
+                  mergeRequest.detailed_merge_status ||
+                  mergeRequest.merge_status ||
+                  ""
+                )
+              );
+            } catch (error) {
+              console.error(body);
+              process.exit(1);
+            }
+          });
+        ')
+
+        echo "Merge status: ${DETAILED_MERGE_STATUS}"
+
+        case "${DETAILED_MERGE_STATUS}" in
+          checking|unchecked|preparing|approvals_syncing)
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 2
+            ;;
+
+          *)
+            break
+            ;;
+        esac
+      done
+
+      # =====================================================
+      # 3. ĐỌC THÔNG TIN MR
+      # =====================================================
+      MR_STATE=$(printf '%s' "${MR_RESPONSE}" | node -e '
+        let body = "";
+
+        process.stdin.on("data", chunk => {
+          body += chunk;
+        });
+
+        process.stdin.on("end", () => {
+          try {
+            const mergeRequest = JSON.parse(body);
+            process.stdout.write(String(mergeRequest.state || ""));
+          } catch (error) {
+            console.error(body);
+            process.exit(1);
+          }
+        });
+      ')
+
+      MR_SHA=$(printf '%s' "${MR_RESPONSE}" | node -e '
+        let body = "";
+
+        process.stdin.on("data", chunk => {
+          body += chunk;
+        });
+
+        process.stdin.on("end", () => {
+          try {
+            const mergeRequest = JSON.parse(body);
+
+            if (!mergeRequest.sha) {
+              console.error("GitLab did not return MR source SHA:");
+              console.error(body);
+              process.exit(1);
+            }
+
+            process.stdout.write(String(mergeRequest.sha));
+          } catch (error) {
+            console.error(body);
+            process.exit(1);
+          }
+        });
+      ')
+
+      HAS_CONFLICTS=$(printf '%s' "${MR_RESPONSE}" | node -e '
+        let body = "";
+
+        process.stdin.on("data", chunk => {
+          body += chunk;
+        });
+
+        process.stdin.on("end", () => {
+          try {
+            const mergeRequest = JSON.parse(body);
+
+            process.stdout.write(
+              mergeRequest.has_conflicts === true
+                ? "true"
+                : "false"
+            );
+          } catch (error) {
+            console.error(body);
+            process.exit(1);
+          }
+        });
+      ')
+
+      echo "MR: !${MR_IID}"
+      echo "MR state: ${MR_STATE}"
+      echo "MR SHA: ${MR_SHA}"
+      echo "Detailed merge status: ${DETAILED_MERGE_STATUS}"
+      echo "Has conflicts: ${HAS_CONFLICTS}"
+
+      if [ "${MR_STATE}" != "opened" ]; then
+        echo "ERROR: MR !${MR_IID} không còn ở trạng thái opened."
+        exit 1
+      fi
+
+      if [ "${HAS_CONFLICTS}" = "true" ]; then
+        echo "ERROR: Có conflict giữa ${SOURCE_BRANCH} và ${TARGET_BRANCH}."
+        echo "MR !${MR_IID} sẽ được giữ lại để xử lý thủ công."
+        exit 1
+      fi
+
+      case "${DETAILED_MERGE_STATUS}" in
+        conflict)
+          echo "ERROR: GitLab xác định MR đang có conflict."
+          exit 1
+          ;;
+
+        not_open)
+          echo "ERROR: MR không còn mở."
+          exit 1
+          ;;
+
+        draft)
+          echo "ERROR: MR đang ở trạng thái Draft."
+          exit 1
+          ;;
+
+        discussions_not_resolved)
+          echo "ERROR: MR còn discussion chưa được resolve."
+          exit 1
+          ;;
+
+        not_approved)
+          echo "ERROR: MR chưa đủ approval."
+          exit 1
+          ;;
+
+        checking|unchecked|preparing|approvals_syncing)
+          echo "ERROR: GitLab chưa tính xong trạng thái merge."
+          exit 1
+          ;;
+
+        *)
+          echo "MR passed local conflict checks."
+          ;;
+      esac
+
+      # =====================================================
+      # 4. YÊU CẦU GITLAB MERGE
+      #
+      # auto_merge=true:
+      # - Merge ngay nếu mọi điều kiện đã đạt.
+      # - Hoặc chờ merge checks/pipeline của MR hoàn tất.
+      #
+      # sha:
+      # - Chỉ merge đúng commit đã kiểm tra.
+      # - Nếu source branch thay đổi, GitLab từ chối merge.
+      # =====================================================
+      echo "Requesting merge for MR !${MR_IID}..."
+
+      MERGE_HTTP_CODE=$(curl \
+        --silent \
+        --show-error \
+        --output /tmp/gitlab-merge-response.json \
+        --write-out "%{http_code}" \
+        --request PUT \
+        --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+        --form "sha=${MR_SHA}" \
+        --form "auto_merge=true" \
+        --form "should_remove_source_branch=false" \
+        "${MR_API_URL}/${MR_IID}/merge")
+
+      echo "GitLab merge response:"
+
+      if [ -f /tmp/gitlab-merge-response.json ]; then
+        cat /tmp/gitlab-merge-response.json
+        echo
+      fi
+
+      case "${MERGE_HTTP_CODE}" in
+        200|201|202)
+          echo "SUCCESS: GitLab accepted merge request."
+          echo "${SOURCE_BRANCH} -> ${TARGET_BRANCH}"
+          ;;
+
+        401)
+          echo "ERROR 401: GITLAB_TOKEN không hợp lệ hoặc đã hết hạn."
+          exit 1
+          ;;
+
+        403)
+          echo "ERROR 403: Token không có quyền merge vào ${TARGET_BRANCH}."
+          echo "Kiểm tra role của Project Access Token và Branch rules."
+          exit 1
+          ;;
+
+        405)
+          echo "ERROR 405: MR hiện không thể merge."
+          echo "Nguyên nhân có thể là conflict, approval hoặc merge checks."
+          exit 1
+          ;;
+
+        409)
+          echo "ERROR 409: Source branch đã thay đổi."
+          echo "Commit SHA hiện tại không còn khớp với SHA vừa kiểm tra."
+          exit 1
+          ;;
+
+        422)
+          echo "ERROR 422: GitLab không thể bật auto-merge cho MR."
+          exit 1
+          ;;
+
+        *)
+          echo "ERROR: GitLab API trả về HTTP ${MERGE_HTTP_CODE}."
+          exit 1
+          ;;
+      esac
+
+
+# =========================================================
+# DEV -> STAGING
+#
+# Khi push lên dev:
+# - Không có deploy job nào chạy.
+# - Job này tạo MR dev -> staging.
+# - GitLab tự merge nếu không conflict và đủ điều kiện.
+# =========================================================
+promote_dev_to_staging:
+  extends: .auto_promote
+
+  variables:
+    SOURCE_BRANCH: "dev"
+    TARGET_BRANCH: "staging"
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" && $CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+
+    - when: never
+
+
+# =========================================================
+# STAGING -> MASTER
+#
+# Khi dev được merge vào staging:
+# 1. deploy_staging chạy trước.
+# 2. Nếu deploy staging thành công, job này mới chạy.
+# 3. Tạo MR staging -> master.
+# 4. GitLab tự merge vào master.
+# =========================================================
+promote_staging_to_main:
+  extends: .auto_promote
+
+  variables:
+    SOURCE_BRANCH: "staging"
+    TARGET_BRANCH: "main"
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging" && $CI_PIPELINE_SOURCE == "push"'
+      when: on_success
+
+    - when: never
+
+
+# =========================================================
+# PRODUCTION — GIỮ NGUYÊN
+# =========================================================
+# deploy_prod:
+#   stage: deploy
+#   extends: .default_deploy
+
+#   tags:
+#     - safe-care-api-runner
+
+#   rules:
+#     - if: '$CI_COMMIT_BRANCH == "main"'
+
+#   variables:
+#     APP_DIR: "/var/www/api-soffice"
+#     APP_USER: "api-soffice"
+#     PM2_APP_NAME: "api-soffice"
+
+#   script:
+#     - 'echo "=== [1/5] Giai đoạn: Sync code ==="'
+#     - 'rsync -rv --delete --exclude=".git" --exclude="node_modules" --exclude="public" --exclude="secrets" --exclude=".env" $CI_PROJECT_DIR/ $APP_DIR/'
+#     - 'echo "=== Hoàn thành Sync code ==="'
+
+#     - 'echo "=== [2/5] Giai đoạn: Cài đặt dependencies ==="'
+#     - 'cd $APP_DIR'
+#     - 'npm ci'
+#     - 'echo "=== Hoàn thành cài đặt dependencies ==="'
+
+#     - 'echo "=== [3/5] Giai đoạn: Đồng bộ Database ==="'
+#     - 'npm run db:prod:sync'
+#     - 'echo "=== Hoàn thành đồng bộ Database ==="'
+
+#     - 'echo "=== [4/5] Giai đoạn: Build backend ==="'
+#     - 'npm run build'
+#     - 'echo "=== Hoàn thành Build backend ==="'
+
+#     - 'echo "=== [5/5] Giai đoạn: Restart PM2 ==="'
+#     - 'sudo -u $APP_USER pm2 restart $PM2_APP_NAME --update-env || sudo -u $APP_USER pm2 start npm --name $PM2_APP_NAME -- run start:prod'
+#     - 'echo "=== Hoàn thành Restart PM2 - Pipeline hoàn tất thành công ==="'
+
+
+# =========================================================
+# STAGING — GIỮ NGUYÊN
+# =========================================================
+deploy_staging:
+  stage: deploy
+  extends: .default_deploy
+
+  tags:
+    - safe-care-api-runner
+
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+
+  variables:
+    APP_DIR: "/var/www/safe-care-api-staging"
+    APP_USER: "safe-care-api-staging"
+    PM2_APP_NAME: "safe-care-api-staging"
+
+  script:
+    - 'echo "=== [1/5] Giai đoạn: Sync code ==="'
+    - 'rsync -rv --delete --exclude=".git" --exclude="node_modules" --exclude="public" --exclude="secrets" --exclude=".env" $CI_PROJECT_DIR/ $APP_DIR/'
+    - 'echo "=== Hoàn thành Sync code ==="'
+
+    - 'echo "=== [2/5] Giai đoạn: Cài đặt dependencies ==="'
+    - 'cd $APP_DIR'
+    - 'npm ci'
+    - 'echo "=== Hoàn thành cài đặt dependencies ==="'
+
+    - 'echo "=== [3/5] Giai đoạn: Đồng bộ Database ==="'
+    - 'npm run db:prod:sync'
+    - 'echo "=== Hoàn thành đồng bộ Database ==="'
+
+    - 'echo "=== [4/5] Giai đoạn: Build backend ==="'
+    - 'npm run build'
+    - 'echo "=== Hoàn thành Build backend ==="'
+
+    - 'echo "=== [5/5] Giai đoạn: Restart PM2 ==="'
+    - 'sudo -u $APP_USER pm2 restart $PM2_APP_NAME --update-env || sudo -u $APP_USER pm2 start npm --name $PM2_APP_NAME -- run start:prod'
+    - 'echo "=== Hoàn thành Restart PM2 - Pipeline hoàn tất thành công ==="'
