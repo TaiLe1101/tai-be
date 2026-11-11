@@ -6,7 +6,6 @@ import { PrismaModule } from '~/modules/prisma/prisma.module';
 import { RBACModule } from '~/modules/rbac/rbac.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { RedisModule } from './modules/redis/redis.module';
-import { SystemLogsModule } from './modules/system-logs/system-logs.module';
 
 @Module({
   imports: [
@@ -16,7 +15,6 @@ import { SystemLogsModule } from './modules/system-logs/system-logs.module';
     }),
     PrismaModule,
     AuthModule,
-    SystemLogsModule,
     RedisModule,
     RBACModule,
   ],
