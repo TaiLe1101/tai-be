@@ -28,6 +28,7 @@ import { PrismaService } from '~/modules/prisma/prisma.service';
 import { APP_RELEASE_ROOT, APP_RELEASE_STAGING } from './app-release-upload';
 import { AppReleasesModule } from './app-releases.module';
 import type { AppReleasesService } from './app-releases.service';
+import { RELEASE_CHUNK_SIZE } from './app-release-chunks.service';
 
 jest.mock('./app-release-upload', () => {
   const fs = jest.requireActual<typeof import('node:fs')>('node:fs');
@@ -474,6 +475,132 @@ describe('desktop release API', () => {
       .field('version', '1.4.0')
       .expect(400);
     expect(await readdir(APP_RELEASE_STAGING)).toEqual(before);
+  });
+
+  it('uploads a 150 MiB installer in parts, retries a part and completes idempotently', async () => {
+    const version = '2.0.0';
+    const installerSize = 150 * 1024 * 1024 + 17;
+    const count = Math.ceil(installerSize / RELEASE_CHUNK_SIZE);
+    const part = (index: number) =>
+      Buffer.alloc(
+        Math.min(
+          RELEASE_CHUNK_SIZE,
+          installerSize - index * RELEASE_CHUNK_SIZE,
+        ),
+        index,
+      );
+    const hash = createHash('sha512');
+    for (let index = 0; index < count; index++) hash.update(part(index));
+    const sha512 = hash.digest('base64');
+    const metadata = Buffer.from(
+      manifest(version, {
+        files: [{ url: filename(version), size: installerSize, sha512 }],
+        sha512,
+      }),
+    );
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/app-releases/uploads')
+      .send({
+        files: {
+          manifest: { name: 'latest.yml', size: metadata.length },
+          installer: { name: filename(version), size: installerSize },
+          blockmap: {
+            name: `${filename(version)}.blockmap`,
+            size: blockmap.length,
+          },
+        },
+      })
+      .expect(201);
+    const { uploadId, chunkSize } = (
+      created.body as {
+        data: {
+          uploadId: string;
+          chunkSize: number;
+        };
+      }
+    ).data;
+    expect(chunkSize).toBe(RELEASE_CHUNK_SIZE);
+    const url = `/api/v1/app-releases/uploads/${uploadId}`;
+    const sendPart = (field: string, index: number, buffer: Buffer) =>
+      request(app.getHttpServer())
+        .put(`${url}/${field}/${index}`)
+        .attach('chunk', buffer, 'chunk');
+    try {
+      await request(app.getHttpServer()).post(`${url}/complete`).expect(400);
+      await sendPart('installer', count, Buffer.from('x')).expect(400);
+      await sendPart('installer', 0, Buffer.from('too short')).expect(400);
+      await sendPart(
+        'installer',
+        0,
+        Buffer.alloc(RELEASE_CHUNK_SIZE + 1),
+      ).expect(413);
+      await sendPart('manifest', 0, metadata).expect(200);
+      await sendPart('blockmap', 0, blockmap).expect(200);
+      // Arrive out of order, with the last part shorter than the negotiated size.
+      for (let index = count - 1; index >= 0; index--)
+        await sendPart('installer', index, part(index)).expect(200);
+      await sendPart('installer', 0, part(0)).expect(200);
+      const completed = await request(app.getHttpServer())
+        .post(`${url}/complete`)
+        .expect(200);
+      const release = responseData(completed);
+      expect(release.version).toBe(version);
+      const repeated = await request(app.getHttpServer())
+        .post(`${url}/complete`)
+        .expect(200);
+      expect(responseData(repeated).id).toBe(release.id);
+      const artifact = await readFile(
+        join(APP_RELEASE_ROOT, version, filename(version)),
+      );
+      expect(artifact.length).toBe(installerSize);
+      expect(createHash('sha512').update(artifact).digest('base64')).toBe(
+        sha512,
+      );
+      expect(
+        (await readdir(join(APP_RELEASE_STAGING, 'chunks', uploadId))).sort(),
+      ).toEqual(['session.json']);
+      await request(app.getHttpServer())
+        .delete(`/api/v1/app-releases/${release.id}`)
+        .expect(200);
+    } finally {
+      await request(app.getHttpServer()).delete(url);
+    }
+  }, 120_000);
+
+  it('rejects invalid chunk sessions and cancels temporary parts', async () => {
+    const files = {
+      manifest: { name: 'latest.yml', size: 100 },
+      installer: { name: 'setup.exe', size: 100 },
+      blockmap: { name: 'setup.exe.blockmap', size: 100 },
+    };
+    const create = (data: unknown) =>
+      request(app.getHttpServer())
+        .post('/api/v1/app-releases/uploads')
+        .send(data);
+    await create({
+      files: { ...files, installer: { name: '../setup.exe', size: 100 } },
+    }).expect(400);
+    await create({
+      files: {
+        ...files,
+        manifest: { name: 'latest.yml', size: 1024 * 1024 + 1 },
+      },
+    }).expect(400);
+    const response = await create({ files }).expect(201);
+    const { uploadId } = (response.body as { data: { uploadId: string } }).data;
+    const url = `/api/v1/app-releases/uploads/${uploadId}`;
+    await request(app.getHttpServer())
+      .put(`${url}/installer/0`)
+      .attach('chunk', Buffer.alloc(100), 'chunk')
+      .expect(200);
+    await request(app.getHttpServer()).delete(url).expect(200);
+    expect(
+      await readdir(join(APP_RELEASE_STAGING, 'chunks', uploadId)),
+    ).toEqual([]);
+    await request(app.getHttpServer()).post(`${url}/complete`).expect(404);
+    await request(app.getHttpServer())
+      .post('/api/v1/app-releases/uploads/invalid/complete')
+      .expect(400);
   });
 
   it('continues serving ordinary uploads', async () => {
