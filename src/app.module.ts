@@ -7,6 +7,7 @@ import { RBACModule } from '~/modules/rbac/rbac.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { AppReleasesModule } from './modules/app-releases/app-releases.module';
+import { DubbingModule } from './modules/dubbing/dubbing.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { AppReleasesModule } from './modules/app-releases/app-releases.module';
     RedisModule,
     RBACModule,
     AppReleasesModule,
+    DubbingModule,
   ],
 })
 export class AppModule { }

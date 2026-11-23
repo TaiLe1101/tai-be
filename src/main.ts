@@ -45,6 +45,12 @@ async function bootstrap() {
   app.use(cookieParser());
   app.use(bodyParser.json({ limit: '10mb' }));
   app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
+  app.use(
+    bodyParser.raw({
+      type: ['application/gzip', 'application/x-gzip'],
+      limit: '10mb',
+    }),
+  );
   app.use(bodyParser.raw({ limit: '10mb' }));
 
   app.setGlobalPrefix('api', {
@@ -75,6 +81,12 @@ async function bootstrap() {
       'X-Requested-With',
       'x-api-key',
       'X-API-KEY',
+    ],
+    exposedHeaders: [
+      'X-Audio-Duration',
+      'X-TTS-Voice',
+      'X-TTS-Rate',
+      'X-Cache',
     ],
     maxAge: 86400,
   });

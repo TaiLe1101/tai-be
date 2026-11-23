@@ -19,6 +19,13 @@ export const envSchema = z
     REDIS_USERNAME: z.string(),
     REDIS_PASSWORD: z.string(),
     REDIS_KEY_PREFIX: z.string(),
+
+    WORKER_URL: z.string().default('http://127.0.0.1:8000'),
+    WORKER_API_KEY: z.string().default(''),
+    DUBBING_SIGNING_SECRET: z.string().default('tai-dubbing-dev-signing-secret'),
+    DUBBING_SEGMENT_CACHE_TTL_SEC: z.coerce.number().int().positive().default(86400),
+    DUBBING_TTS_CACHE_TTL_SEC: z.coerce.number().int().positive().default(86400),
+    DUBBING_MAX_PAYLOAD_CHARS: z.coerce.number().int().positive().default(2_000_000),
   })
   .passthrough();
 
