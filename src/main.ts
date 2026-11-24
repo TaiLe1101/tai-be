@@ -43,7 +43,14 @@ async function bootstrap() {
     : [];
 
   app.use(cookieParser());
-  app.use(bodyParser.json({ limit: '10mb' }));
+  app.use(
+    bodyParser.json({
+      limit: '10mb',
+      verify: (req, _res, buf) => {
+        (req as { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+      },
+    }),
+  );
   app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
   app.use(
     bodyParser.raw({

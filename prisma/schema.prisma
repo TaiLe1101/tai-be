@@ -53,6 +53,25 @@ enum UpgradeRequestStatus {
   REJECTED
 }
 
+enum PaymentOrderStatus {
+  PENDING
+  PAID
+  EXPIRED
+  CANCELED
+}
+
+enum PaymentPaidSource {
+  WEBHOOK
+  RECONCILIATION
+}
+
+enum SepayEventStatus {
+  RECEIVED
+  PROCESSED
+  UNMATCHED
+  FAILED
+}
+
 model User {
   id        Int       @id @default(autoincrement())
   createdAt DateTime  @default(now()) @map("created_at")
@@ -73,6 +92,7 @@ model User {
   userRoles       UserRole[]
   tenantMembers   TenantMember[]
   upgradeRequests UpgradeRequest[]
+  paymentOrders   PaymentOrder[]
 
   @@index([username])
   @@index([email])
@@ -192,6 +212,7 @@ model Plan {
 
   subscriptions   TenantSubscription[]
   upgradeRequests UpgradeRequest[]
+  paymentOrders   PaymentOrder[]
 
   @@index([isActive, isPublic, sortOrder])
   @@map("plans")
@@ -214,6 +235,7 @@ model Tenant {
   subscriptions   TenantSubscription[]
   monthlyUsages   TenantUsageMonthly[]
   upgradeRequests UpgradeRequest[]
+  paymentOrders   PaymentOrder[]
 
   @@index([status, type])
   @@map("tenants")
@@ -297,4 +319,119 @@ model UpgradeRequest {
   @@index([tenantId, status])
   @@index([status, createdAt])
   @@map("upgrade_requests")
+}
+
+// === SEPAY AUTOMATED PAYMENTS ===
+
+model PaymentOrder {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  paymentCode     String             @unique @map("payment_code")
+  tenantId        Int                @map("tenant_id")
+  userId          Int                @map("user_id")
+  planId          Int                @map("plan_id")
+  billingCycle    BillingCycle       @default(MONTHLY) @map("billing_cycle")
+  amount          Int
+  currency        String             @default("VND")
+  status          PaymentOrderStatus @default(PENDING)
+  bankCode        String             @map("bank_code")
+  accountNumber   String             @map("account_number")
+  accountName     String             @map("account_name")
+  transferContent String             @map("transfer_content")
+  expiresAt       DateTime           @map("expires_at")
+
+  paidAt                  DateTime?          @map("paid_at")
+  paidAmount              Int?               @map("paid_amount")
+  paidSource              PaymentPaidSource? @map("paid_source")
+  paidReferenceCode       String?            @map("paid_reference_code")
+  paidTransactionDate     String?            @map("paid_transaction_date")
+  paidAccountNumber       String?            @map("paid_account_number")
+  paidWebhookId           BigInt?            @map("paid_webhook_id")
+  paidApiTxId             String?            @map("paid_api_tx_id")
+  activatedSubscriptionId Int?               @map("activated_subscription_id")
+
+  tenant          Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan            Plan                  @relation(fields: [planId], references: [id], onDelete: Restrict)
+  webhookEvents   SepayWebhookEvent[]
+  apiTransactions SepayApiTransaction[]
+
+  @@index([tenantId, createdAt])
+  @@index([status, expiresAt])
+  @@map("payment_orders")
+}
+
+model SepayWebhookEvent {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sepayWebhookId     BigInt           @unique @map("sepay_webhook_id")
+  gateway            String
+  transactionDate    String           @map("transaction_date")
+  transactionDateUtc DateTime?        @map("transaction_date_utc")
+  accountNumber      String           @map("account_number")
+  subAccount         String?          @map("sub_account")
+  code               String?
+  transferType       String           @map("transfer_type")
+  transferAmount     Int              @map("transfer_amount")
+  accumulated        Int              @default(0)
+  referenceCode      String?          @map("reference_code")
+  rawPayload         Json             @map("raw_payload")
+  status             SepayEventStatus @default(RECEIVED)
+  verdict            Boolean          @default(false)
+  unmatchedReason    String?          @map("unmatched_reason")
+  orderId            Int?             @map("order_id")
+  paymentCode        String?          @map("payment_code")
+
+  order PaymentOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([code])
+  @@index([orderId])
+  @@map("sepay_webhook_events")
+}
+
+model SepayApiTransaction {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sepayApiTxId       String           @unique @map("sepay_api_tx_id")
+  bankBrandName      String           @map("bank_brand_name")
+  accountNumber      String           @map("account_number")
+  subAccount         String?          @map("sub_account")
+  transactionDate    String           @map("transaction_date")
+  transactionDateUtc DateTime?        @map("transaction_date_utc")
+  transferType       String           @map("transfer_type")
+  amount             Int
+  code               String?
+  referenceNumber    String?          @map("reference_number")
+  rawPayload         Json             @map("raw_payload")
+  status             SepayEventStatus @default(RECEIVED)
+  verdict            Boolean          @default(false)
+  unmatchedReason    String?          @map("unmatched_reason")
+  orderId            Int?             @map("order_id")
+  paymentCode        String?          @map("payment_code")
+
+  order PaymentOrder? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([code])
+  @@index([orderId])
+  @@map("sepay_api_transactions")
+}
+
+model SepayReconcileState {
+  id                 Int       @id @default(1)
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  lastRunAt          DateTime? @map("last_run_at")
+  lastCursorId       String?   @map("last_cursor_id")
+  lastFetchedCount   Int       @default(0) @map("last_fetched_count")
+  lastMatchedCount   Int       @default(0) @map("last_matched_count")
+  lastUnmatchedCount Int       @default(0) @map("last_unmatched_count")
+
+  @@map("sepay_reconcile_states")
 }

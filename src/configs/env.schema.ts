@@ -26,6 +26,18 @@ export const envSchema = z
     DUBBING_SEGMENT_CACHE_TTL_SEC: z.coerce.number().int().positive().default(86400),
     DUBBING_TTS_CACHE_TTL_SEC: z.coerce.number().int().positive().default(86400),
     DUBBING_MAX_PAYLOAD_CHARS: z.coerce.number().int().positive().default(2_000_000),
+
+    SEPAY_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
+    SEPAY_WEBHOOK_AUTH_MODE: z.enum(['hmac', 'apikey']).default('hmac'),
+    SEPAY_WEBHOOK_SECRET: z.string().default(''),
+    SEPAY_API_TOKEN: z.string().default(''),
+    SEPAY_BANK_CODE: z.string().default(''),
+    SEPAY_ACCOUNT_NUMBER: z.string().default(''),
+    SEPAY_ACCOUNT_NAME: z.string().default(''),
+    SEPAY_PAYMENT_CODE_PREFIX: z.string().default('TAI'),
+    SEPAY_DES_PREFIX: z.string().default(''),
+    SEPAY_ORDER_TTL_MINUTES: z.coerce.number().int().positive().default(15),
+    SEPAY_RECONCILE_INTERVAL_MINUTES: z.coerce.number().int().positive().default(20),
   })
   .passthrough();
 
