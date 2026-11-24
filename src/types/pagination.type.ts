@@ -12,4 +12,10 @@ export class PaginationType {
 
   @ApiProperty({ example: 50, description: 'Tổng số bản ghi' })
   totalItems: number;
+
+  @ApiProperty({ example: 50, required: false })
+  total?: number;
+
+  @ApiProperty({ example: 5, required: false })
+  totalPages?: number;
 }

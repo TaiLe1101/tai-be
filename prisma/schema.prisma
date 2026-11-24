@@ -18,6 +18,41 @@ enum LoginStatus {
   FAILED
 }
 
+enum TenantType {
+  PERSONAL
+  ORGANIZATION
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum TenantMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELED
+  PENDING
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+  LIFETIME
+}
+
+enum UpgradeRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model User {
   id        Int       @id @default(autoincrement())
   createdAt DateTime  @default(now()) @map("created_at")
@@ -27,6 +62,7 @@ model User {
 
   isRoot      Boolean   @default(false) @map("is_root")
   username    String    @unique
+  email       String?   @unique
   password    String
   avatar      String?
   firstName   String    @map("first_name")
@@ -34,9 +70,12 @@ model User {
   phoneNumber String?   @unique @map("phone_number")
   dateOfBirth DateTime? @map("date_of_birth")
 
-  userRoles UserRole[]
+  userRoles       UserRole[]
+  tenantMembers   TenantMember[]
+  upgradeRequests UpgradeRequest[]
 
   @@index([username])
+  @@index([email])
   @@map("users")
 }
 
@@ -125,4 +164,137 @@ model AppReleaseChannel {
   release   AppRelease @relation(fields: [releaseId], references: [id], onDelete: Restrict)
 
   @@map("app_release_channels")
+}
+
+// === SAAS MULTI-TENANT & SUBSCRIPTIONS ===
+
+model Plan {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  code                String   @unique
+  name                String
+  description         String?
+  badge               String?
+  priceMonthly        Int      @default(0) @map("price_monthly")
+  priceYearly         Int      @default(0) @map("price_yearly")
+  currency            String   @default("VND")
+  monthlyMinutesLimit Int?     @map("monthly_minutes_limit")
+  maxSeats            Int      @default(1) @map("max_seats")
+  features            String[] @default([])
+  isPublic            Boolean  @default(true) @map("is_public")
+  isDefault           Boolean  @default(false) @map("is_default")
+  isHighlighted       Boolean  @default(false) @map("is_highlighted")
+  sortOrder           Int      @default(0) @map("sort_order")
+  isActive            Boolean  @default(true) @map("is_active")
+
+  subscriptions   TenantSubscription[]
+  upgradeRequests UpgradeRequest[]
+
+  @@index([isActive, isPublic, sortOrder])
+  @@map("plans")
+}
+
+model Tenant {
+  id        Int       @id @default(autoincrement())
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  code         String       @unique
+  name         String
+  type         TenantType   @default(PERSONAL)
+  status       TenantStatus @default(ACTIVE)
+  contactEmail String?      @map("contact_email")
+  notes        String?
+
+  members         TenantMember[]
+  subscriptions   TenantSubscription[]
+  monthlyUsages   TenantUsageMonthly[]
+  upgradeRequests UpgradeRequest[]
+
+  @@index([status, type])
+  @@map("tenants")
+}
+
+model TenantMember {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenantId Int              @map("tenant_id")
+  userId   Int              @map("user_id")
+  role     TenantMemberRole @default(MEMBER)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+  @@map("tenant_members")
+}
+
+model TenantSubscription {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenantId                    Int                @map("tenant_id")
+  planId                      Int                @map("plan_id")
+  status                      SubscriptionStatus @default(ACTIVE)
+  billingCycle                BillingCycle       @default(MONTHLY) @map("billing_cycle")
+  startsAt                    DateTime           @default(now()) @map("starts_at")
+  expiresAt                   DateTime?          @map("expires_at")
+  monthlyMinutesLimitOverride Int?               @map("monthly_minutes_limit_override")
+  note                        String?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan   Plan   @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, status])
+  @@index([planId])
+  @@map("tenant_subscriptions")
+}
+
+model TenantUsageMonthly {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenantId      Int    @map("tenant_id")
+  period        String
+  usedSeconds   Int    @default(0) @map("used_seconds")
+  dubbedCues    Int    @default(0) @map("dubbed_cues")
+  sessionsCount Int    @default(0) @map("sessions_count")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, period])
+  @@index([period])
+  @@map("tenant_usage_monthly")
+}
+
+model UpgradeRequest {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenantId        Int                  @map("tenant_id")
+  userId          Int                  @map("user_id")
+  requestedPlanId Int                  @map("requested_plan_id")
+  billingCycle    BillingCycle         @default(MONTHLY) @map("billing_cycle")
+  status          UpgradeRequestStatus @default(PENDING)
+  contactNote     String?              @map("contact_note")
+  adminNote       String?              @map("admin_note")
+  resolvedAt      DateTime?            @map("resolved_at")
+
+  tenant        Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  requestedPlan Plan   @relation(fields: [requestedPlanId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, status])
+  @@index([status, createdAt])
+  @@map("upgrade_requests")
 }

@@ -5,19 +5,23 @@ import { JwtModule } from '@nestjs/jwt';
 import { JwtAuthGuard } from '~/modules/auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '~/modules/auth/guards/permissions.guard';
 import { JwtStrategy } from '~/modules/auth/strategies/jwt.strategy';
-import { PrismaModule } from '~/modules/prisma/prisma.module';
 import { RedisModule } from '~/modules/redis/redis.module';
+import { SaasModule } from '~/modules/saas/saas.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 
 @Module({
   controllers: [AuthController],
-  providers: [AuthService,
-    AuthService, JwtStrategy, PermissionsGuard,
+  providers: [
+    AuthService,
+    JwtStrategy,
+    PermissionsGuard,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
   ],
-  imports: [RedisModule,
+  imports: [
+    RedisModule,
+    SaasModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -29,4 +33,4 @@ import { AuthService } from './auth.service';
     }),
   ],
 })
-export class AuthModule { }
+export class AuthModule {}

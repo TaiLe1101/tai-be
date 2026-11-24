@@ -21,6 +21,10 @@ export const PERMISSIONS = {
   SETTINGS: {
     MANAGER: 'settings:manager',
   },
+  SAAS: {
+    VIEW: 'saas:view',
+    MANAGE: 'saas:manage',
+  },
   LOGIN_LOGS: {
     VIEW: 'login_logs:view',
   },
@@ -112,5 +116,19 @@ export const SYSTEM_PERMISSIONS_METADATA = [
     name: 'Quản lý cấu hình',
     description: 'Quản lý cấu hình hệ thống',
     group: 'Cấu hình',
+  },
+
+  // SAAS
+  {
+    code: PERMISSIONS.SAAS.VIEW,
+    name: 'Xem quản lý SaaS',
+    description: 'Xem tổng quan, gói dịch vụ, tenant và yêu cầu nâng cấp',
+    group: 'Quản lý SaaS',
+  },
+  {
+    code: PERMISSIONS.SAAS.MANAGE,
+    name: 'Quản trị SaaS',
+    description: 'Tạo/sửa gói, quản lý tenant, gán gói và duyệt yêu cầu nâng cấp',
+    group: 'Quản lý SaaS',
   },
 ];

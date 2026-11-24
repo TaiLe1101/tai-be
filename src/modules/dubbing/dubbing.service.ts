@@ -2,9 +2,14 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
+import {
+  type DubbingActor,
+  SaasEntitlementService,
+} from '~/modules/saas/saas-entitlement.service';
 import { DubbingCacheService } from './dubbing-cache.service';
 import { DubbingSigningService } from './dubbing-signing.service';
 import {
@@ -77,7 +82,13 @@ export class DubbingService {
     private readonly signingService: DubbingSigningService,
     private readonly cacheService: DubbingCacheService,
     private readonly workerClient: DubbingWorkerClient,
+    @Optional() private readonly entitlementService?: SaasEntitlementService,
   ) {}
+
+  async assertCanDub(actor?: DubbingActor): Promise<void> {
+    if (!this.entitlementService || !actor) return;
+    await this.entitlementService.assertCanDub(actor);
+  }
 
   private get segmentCacheTtlSec(): number {
     return (
@@ -343,7 +354,10 @@ export class DubbingService {
     }
   }
 
-  async ingestSessions(sessions: unknown): Promise<SessionsResponse> {
+  async ingestSessions(
+    sessions: unknown,
+    actor?: DubbingActor,
+  ): Promise<SessionsResponse> {
     if (!Array.isArray(sessions)) {
       throw new BadRequestException({
         code: 'INVALID_SESSIONS_PAYLOAD',
@@ -415,7 +429,14 @@ export class DubbingService {
     }
 
     await this.cacheService.recordSessions(valid);
-    return { accepted: valid.length };
+    const quota =
+      this.entitlementService && actor
+        ? await this.entitlementService.recordDubbingUsage(actor, valid)
+        : undefined;
+    return {
+      accepted: valid.length,
+      ...(quota !== undefined ? { quota } : {}),
+    };
   }
 
   private async loadSourceSegments(

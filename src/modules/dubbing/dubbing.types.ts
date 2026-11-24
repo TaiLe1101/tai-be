@@ -1,3 +1,5 @@
+import type { QuotaDto } from '~/modules/saas/saas.types';
+
 export interface DubbingSound {
   start: number;
   duration: number;
@@ -116,6 +118,7 @@ export interface SessionsRequest {
 
 export interface SessionsResponse {
   accepted: number;
+  quota?: QuotaDto;
 }
 
 export interface WorkerHealthStatus {

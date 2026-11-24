@@ -12,10 +12,12 @@ import {
   UseFilters,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { createGunzip } from 'node:zlib';
 import { Public } from '~/common/decorators/public.decorator';
+import { CurrentUser } from '~/modules/auth/decorators/current-user.decorator';
+import type { CurrentUserType } from '~/types/current-user.type';
 import { DubbingExceptionFilter } from './dubbing-exception.filter';
 import { DubbingService } from './dubbing.service';
 import type {
@@ -28,7 +30,7 @@ import type {
 
 const MAX_COMPRESSED_BYTES = 10 * 1024 * 1024;
 
-@Public()
+@ApiBearerAuth('JWT-Auth')
 @UseFilters(DubbingExceptionFilter)
 @ApiTags('Realtime Dubbing')
 @Controller('dubbing')
@@ -44,6 +46,7 @@ export class DubbingController {
     );
   }
 
+  @Public()
   @Get('health')
   @ApiOperation({ summary: 'Realtime dubbing gateway and AI worker health' })
   async health() {
@@ -56,7 +59,11 @@ export class DubbingController {
     summary:
       'Fast-path YouTube subtitles ingestion (accepts application/gzip or application/json)',
   })
-  async youtubeSubtitles(@Req() req: Request) {
+  async youtubeSubtitles(
+    @CurrentUser() user: CurrentUserType,
+    @Req() req: Request,
+  ) {
+    await this.dubbingService.assertCanDub(user);
     const payload = await this.parseYoutubeSubtitlesBody(req);
     return this.dubbingService.processYoutubeSubtitles(payload);
   }
@@ -66,7 +73,11 @@ export class DubbingController {
   @ApiOperation({
     summary: 'Segmented AI translation path (seek-on-demand or lookahead)',
   })
-  async segments(@Body() body: SegmentsRequest) {
+  async segments(
+    @CurrentUser() user: CurrentUserType,
+    @Body() body: SegmentsRequest,
+  ) {
+    await this.dubbingService.assertCanDub(user);
     return this.dubbingService.getSegment(body);
   }
 
@@ -76,7 +87,12 @@ export class DubbingController {
     summary:
       'HMAC-verified inline neural TTS synthesis with Redis audio+duration caching',
   })
-  async tts(@Body() body: TtsRequest, @Res() res: Response) {
+  async tts(
+    @CurrentUser() user: CurrentUserType,
+    @Body() body: TtsRequest,
+    @Res() res: Response,
+  ) {
+    await this.dubbingService.assertCanDub(user);
     const result = await this.dubbingService.synthesizeTts(body);
 
     res.setHeader('X-Audio-Duration', String(result.duration));
@@ -103,8 +119,11 @@ export class DubbingController {
   @Post('sessions')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Batched dubbing playback telemetry (max 20)' })
-  async sessions(@Body() body: SessionsRequest) {
-    return this.dubbingService.ingestSessions(body?.sessions);
+  async sessions(
+    @CurrentUser() user: CurrentUserType,
+    @Body() body: SessionsRequest,
+  ) {
+    return this.dubbingService.ingestSessions(body?.sessions, user);
   }
 
   private async parseYoutubeSubtitlesBody(

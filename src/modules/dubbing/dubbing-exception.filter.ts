@@ -10,7 +10,8 @@ import type { Request, Response } from 'express';
 
 /**
  * Scoped exception filter for /api/v1/dubbing/* returning flat JSON errors
- * (preserving structured codes such as SUBTITLE_DOWNLOAD_FAILED) instead of ResponseApi.
+ * (preserving structured codes such as AUTH_REQUIRED, SUBTITLE_DOWNLOAD_FAILED,
+ * QUOTA_EXCEEDED, SUBSCRIPTION_EXPIRED, TENANT_SUSPENDED, and optional quota).
  */
 @Catch()
 export class DubbingExceptionFilter implements ExceptionFilter {
@@ -24,10 +25,14 @@ export class DubbingExceptionFilter implements ExceptionFilter {
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let code: string = HttpStatus[status] ?? 'INTERNAL_SERVER_ERROR';
     let message = 'Internal server error';
+    let quota: unknown;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
-      code = HttpStatus[status] ?? 'HTTP_EXCEPTION';
+      code =
+        status === HttpStatus.UNAUTHORIZED
+          ? 'AUTH_REQUIRED'
+          : (HttpStatus[status] ?? 'HTTP_EXCEPTION');
       const res = exception.getResponse();
 
       if (typeof res === 'string') {
@@ -36,6 +41,9 @@ export class DubbingExceptionFilter implements ExceptionFilter {
         const obj = res as Record<string, unknown>;
         if (typeof obj.code === 'string' && obj.code.trim()) {
           code = obj.code;
+        }
+        if ('quota' in obj && obj.quota !== undefined) {
+          quota = obj.quota;
         }
         if (Array.isArray(obj.message)) {
           message = obj.message.join(', ');
@@ -62,6 +70,7 @@ export class DubbingExceptionFilter implements ExceptionFilter {
       statusCode: status,
       code,
       message,
+      ...(quota !== undefined ? { quota } : {}),
     });
   }
 }

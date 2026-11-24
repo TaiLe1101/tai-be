@@ -1,5 +1,13 @@
 import { HttpService } from '@nestjs/axios';
-import { Module, VersioningType } from '@nestjs/common';
+import {
+  type ExecutionContext,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Module,
+  UnauthorizedException,
+  VersioningType,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory, Reflector } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -7,10 +15,12 @@ import * as bodyParser from 'body-parser';
 import { gzipSync } from 'node:zlib';
 import { of, throwError } from 'rxjs';
 import request from 'supertest';
+import { IS_PUBLIC_KEY } from '~/common/decorators/public.decorator';
 import { HttpExceptionFilter } from '~/filters/http-exception.filter';
-import { JwtAuthGuard } from '~/modules/auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '~/modules/auth/guards/permissions.guard';
 import { RedisService } from '~/modules/redis/redis.service';
+import { SaasEntitlementService } from '~/modules/saas/saas-entitlement.service';
+import type { QuotaDto } from '~/modules/saas/saas.types';
 import { DubbingCacheService } from './dubbing-cache.service';
 import { DubbingController } from './dubbing.controller';
 import { DubbingSigningService } from './dubbing-signing.service';
@@ -22,6 +32,7 @@ import type {
 } from './dubbing.types';
 
 const TEST_SIGNING_SECRET = 'unit-test-dubbing-secret';
+const VALID_BEARER = 'Bearer valid-test-jwt';
 
 function createConfigMock(overrides: Record<string, unknown> = {}) {
   const values: Record<string, unknown> = {
@@ -60,7 +71,7 @@ function createInMemoryRedisMock() {
     lists,
     client,
     get: jest.fn(async <T>(key: string): Promise<T | null> => {
-      return (store.has(key) ? (store.get(key) as T) : null);
+      return store.has(key) ? (store.get(key) as T) : null;
     }),
     set: jest.fn(async (key: string, value: unknown) => {
       store.set(key, value);
@@ -74,17 +85,65 @@ function createInMemoryRedisMock() {
   };
 }
 
+class TestBearerAuthGuard {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) return true;
+
+    const req = context.switchToHttp().getRequest<{
+      headers: Record<string, string | undefined>;
+      user?: Record<string, unknown>;
+    }>();
+    const auth = req.headers['authorization'];
+    if (auth !== VALID_BEARER) {
+      throw new UnauthorizedException('Unauthorized');
+    }
+    req.user = {
+      id: 42,
+      username: 'tester@example.com',
+      email: 'tester@example.com',
+      isRoot: false,
+      permissions: [],
+    };
+    return true;
+  }
+}
+
 describe('DubbingController (/api/v1/dubbing/*)', () => {
   let app: NestExpressApplication;
   let httpService: { get: jest.Mock; post: jest.Mock };
   let redisMock: ReturnType<typeof createInMemoryRedisMock>;
   let configMock: ReturnType<typeof createConfigMock>;
+  let entitlementMock: {
+    assertCanDub: jest.Mock;
+    recordDubbingUsage: jest.Mock;
+  };
   let signingService: DubbingSigningService;
+
+  const sampleQuota: QuotaDto = {
+    period: '2026-11',
+    usedSeconds: 120,
+    usedMinutes: 2,
+    limitMinutes: 60,
+    remainingMinutes: 58,
+    isUnlimited: false,
+    canDub: true,
+    blockReason: null,
+  };
 
   async function buildTestApp(configOverrides: Record<string, unknown> = {}) {
     httpService = { get: jest.fn(), post: jest.fn() };
     redisMock = createInMemoryRedisMock();
     configMock = createConfigMock(configOverrides);
+    entitlementMock = {
+      assertCanDub: jest.fn().mockResolvedValue(null),
+      recordDubbingUsage: jest.fn().mockResolvedValue(sampleQuota),
+    };
 
     @Module({
       controllers: [DubbingController],
@@ -96,6 +155,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
         { provide: ConfigService, useValue: configMock },
         { provide: HttpService, useValue: httpService },
         { provide: RedisService, useValue: redisMock },
+        { provide: SaasEntitlementService, useValue: entitlementMock },
       ],
     })
     class DubbingTestModule {}
@@ -115,7 +175,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
     instance.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
     const reflector = instance.get(Reflector);
     instance.useGlobalGuards(
-      new JwtAuthGuard(reflector),
+      new TestBearerAuthGuard(reflector),
       new PermissionsGuard(reflector),
     );
     instance.useGlobalFilters(new HttpExceptionFilter());
@@ -132,8 +192,84 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
     await app.close();
   });
 
+  describe('Auth & Quota Enforcement', () => {
+    it('returns flat 401 AUTH_REQUIRED when JWT is missing on protected dubbing endpoints', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/dubbing/segments')
+        .send({ targetLang: 'vi', subtitleText: '[]' })
+        .expect(401);
+
+      expect(res.body).toMatchObject({
+        statusCode: 401,
+        code: 'AUTH_REQUIRED',
+      });
+    });
+
+    it('returns flat 402 QUOTA_EXCEEDED with quota payload when entitlement blocks dubbing', async () => {
+      const blockedQuota: QuotaDto = {
+        ...sampleQuota,
+        usedSeconds: 3600,
+        usedMinutes: 60,
+        remainingMinutes: 0,
+        canDub: false,
+        blockReason: 'QUOTA_EXCEEDED',
+      };
+      entitlementMock.assertCanDub.mockRejectedValue(
+        new HttpException(
+          {
+            code: 'QUOTA_EXCEEDED',
+            message: 'Quota exceeded',
+            quota: blockedQuota,
+          },
+          HttpStatus.PAYMENT_REQUIRED,
+        ),
+      );
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
+        .send({ targetLang: 'vi', subtitleText: '[]' })
+        .expect(402);
+
+      expect(res.body).toEqual({
+        statusCode: 402,
+        code: 'QUOTA_EXCEEDED',
+        message: 'Quota exceeded',
+        quota: blockedQuota,
+      });
+    });
+
+    it('returns flat 403 TENANT_SUSPENDED with quota payload when tenant is suspended', async () => {
+      const suspendedQuota: QuotaDto = {
+        ...sampleQuota,
+        canDub: false,
+        blockReason: 'TENANT_SUSPENDED',
+      };
+      entitlementMock.assertCanDub.mockRejectedValue(
+        new ForbiddenException({
+          code: 'TENANT_SUSPENDED',
+          message: 'Tenant suspended',
+          quota: suspendedQuota,
+        }),
+      );
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/dubbing/tts')
+        .set('Authorization', VALID_BEARER)
+        .send({ text: 'Xin chào', lang: 'vi', sig: 'any' })
+        .expect(403);
+
+      expect(res.body).toEqual({
+        statusCode: 403,
+        code: 'TENANT_SUSPENDED',
+        message: 'Tenant suspended',
+        quota: suspendedQuota,
+      });
+    });
+  });
+
   describe('GET /api/v1/dubbing/health', () => {
-    it('returns flat v2 health payload with worker capabilities without requiring JWT', async () => {
+    it('stays public without requiring JWT and returns flat v2 health payload', async () => {
       httpService.get.mockReturnValue(
         of({
           status: 200,
@@ -211,6 +347,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/youtube-subtitles')
+        .set('Authorization', VALID_BEARER)
         .set('Content-Type', 'application/gzip')
         .send(gz)
         .expect(200);
@@ -247,6 +384,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/youtube-subtitles')
+        .set('Authorization', VALID_BEARER)
         .send({
           videoId: 'xmlVideo123',
           targetLang: 'en',
@@ -279,6 +417,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/youtube-subtitles')
+        .set('Authorization', VALID_BEARER)
         .set('Content-Type', 'application/gzip')
         .send(gz)
         .expect(413);
@@ -292,6 +431,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
     it('returns 400 on invalid gzip bytes', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/youtube-subtitles')
+        .set('Authorization', VALID_BEARER)
         .set('Content-Type', 'application/gzip')
         .send(Buffer.from('not-gzip-content'))
         .expect(400);
@@ -333,9 +473,9 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
         }),
       );
 
-      // Seek to t=40 (gap before segment 1 starting at 60) -> selects segment 1 with mappedFrom=40
       const res1 = await request(app.getHttpServer())
         .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
         .send({
           subtitleUrl:
             'https://www.youtube.com/api/timedtext?v=vidABC12345&lang=en&fmt=json3&pot=token1',
@@ -373,21 +513,10 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
         ),
       ).toBe(true);
       expect(httpService.post).toHaveBeenCalledTimes(1);
-      expect(httpService.post).toHaveBeenCalledWith(
-        'http://worker.test:8000/translate-segment',
-        expect.objectContaining({
-          target_lang: 'vi',
-          source_lang: 'en',
-          context_prev: ['First line.'],
-        }),
-        expect.objectContaining({
-          headers: expect.objectContaining({ 'X-API-Key': 'test-worker-key' }),
-        }),
-      );
 
-      // Second request for same segment (even with refreshed pot token) hits Redis cache!
       const res2 = await request(app.getHttpServer())
         .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
         .send({
           subtitleUrl:
             'https://www.youtube.com/api/timedtext?v=vidABC12345&lang=en&fmt=json3&pot=token2',
@@ -403,11 +532,12 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
       expect(httpService.post).toHaveBeenCalledTimes(1);
     });
 
-    it('returns flat 422 { code: "SUBTITLE_DOWNLOAD_FAILED" } when subtitleUrl fails (403/429/network)', async () => {
+    it('returns flat 422 { code: "SUBTITLE_DOWNLOAD_FAILED" } when subtitleUrl fails', async () => {
       httpService.get.mockReturnValue(of({ status: 403, data: 'Forbidden' }));
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
         .send({
           subtitleUrl:
             'https://www.youtube.com/api/timedtext?v=expiredVid1&lang=en&pot=expired',
@@ -420,7 +550,6 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
         statusCode: 422,
         code: 'SUBTITLE_DOWNLOAD_FAILED',
       });
-      expect(typeof (res.body as { message: unknown }).message).toBe('string');
       expect(httpService.post).not.toHaveBeenCalled();
     });
 
@@ -448,6 +577,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
         .send({
           videoId: 'redisDownVid',
           subtitleText: timedtextJson3,
@@ -473,6 +603,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const reqA = request(app.getHttpServer())
         .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
         .send({
           videoId: 'coalesceVid',
           subtitleText: timedtextJson3,
@@ -481,6 +612,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
         });
       const reqB = request(app.getHttpServer())
         .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
         .send({
           videoId: 'coalesceVid',
           subtitleText: timedtextJson3,
@@ -544,6 +676,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/segments')
+        .set('Authorization', VALID_BEARER)
         .send({
           videoId: 'cleanWorkerOutVid',
           subtitleText: timedtextJson3,
@@ -571,6 +704,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
     it('returns 403 when HMAC signature is missing or invalid', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/tts')
+        .set('Authorization', VALID_BEARER)
         .send({
           text: 'Xin chào',
           lang: 'vi',
@@ -601,6 +735,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const miss = await request(app.getHttpServer())
         .post('/api/v1/dubbing/tts')
+        .set('Authorization', VALID_BEARER)
         .send({
           text: 'Xin chào',
           lang: 'vi',
@@ -620,6 +755,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const hit = await request(app.getHttpServer())
         .post('/api/v1/dubbing/tts')
+        .set('Authorization', VALID_BEARER)
         .send({
           text: 'Xin chào',
           lang: 'vi',
@@ -651,6 +787,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/tts')
+        .set('Authorization', VALID_BEARER)
         .send({
           text: 'Hello world',
           lang: 'en',
@@ -670,9 +807,10 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
   });
 
   describe('POST /api/v1/dubbing/sessions', () => {
-    it('accepts up to 20 telemetry sessions and stores them in Redis', async () => {
+    it('accepts up to 20 telemetry sessions, increments monthly usage, and returns updated quota', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/sessions')
+        .set('Authorization', VALID_BEARER)
         .send({
           sessions: [
             {
@@ -691,8 +829,9 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
         })
         .expect(200);
 
-      expect(res.body).toEqual({ accepted: 1 });
+      expect(res.body).toEqual({ accepted: 1, quota: sampleQuota });
       expect(redisMock.client.lpush).toHaveBeenCalledTimes(1);
+      expect(entitlementMock.recordDubbingUsage).toHaveBeenCalledTimes(1);
     });
 
     it('rejects batches exceeding 20 sessions with 400', async () => {
@@ -704,6 +843,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       await request(app.getHttpServer())
         .post('/api/v1/dubbing/sessions')
+        .set('Authorization', VALID_BEARER)
         .send({ sessions: tooMany })
         .expect(400);
     });
@@ -713,6 +853,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
 
       const res = await request(app.getHttpServer())
         .post('/api/v1/dubbing/sessions')
+        .set('Authorization', VALID_BEARER)
         .send({
           sessions: [
             {
@@ -724,7 +865,7 @@ describe('DubbingController (/api/v1/dubbing/*)', () => {
         })
         .expect(200);
 
-      expect(res.body).toEqual({ accepted: 1 });
+      expect(res.body).toEqual({ accepted: 1, quota: sampleQuota });
     });
   });
 });

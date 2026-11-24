@@ -8,6 +8,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { RedisModule } from './modules/redis/redis.module';
 import { AppReleasesModule } from './modules/app-releases/app-releases.module';
 import { DubbingModule } from './modules/dubbing/dubbing.module';
+import { SaasModule } from './modules/saas/saas.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { DubbingModule } from './modules/dubbing/dubbing.module';
       validate: (config) => envSchema.parse(config),
     }),
     PrismaModule,
+    SaasModule,
     AuthModule,
     RedisModule,
     RBACModule,
