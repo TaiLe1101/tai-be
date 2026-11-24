@@ -1,0 +1,155 @@
+name: Deploy TAI Backend (tai-api)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-tai-api
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Ubuntu Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate deployment secrets
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_HOST}" ]; then
+            echo "::error::Missing required secret SSH_HOST"
+            exit 1
+          fi
+          if [ -z "${SSH_PRIVATE_KEY}" ]; then
+            echo "::error::Missing required secret SSH_PRIVATE_KEY"
+            exit 1
+          fi
+
+      - name: Configure SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" | tr -d '\r' > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+
+      - name: Deploy tai-be via SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER || 'root' }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          APP_DIR: ${{ secrets.APP_DIR || '/var/www/tai-api' }}
+          PM2_APP_NAME: tai-api
+        run: |
+          set -euo pipefail
+
+          cat <<'EOF' > /tmp/deploy_tai_api.sh
+          set -euo pipefail
+
+          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+          export NVM_DIR="${NVM_DIR:-/root/.nvm}"
+          if [ -s "${NVM_DIR}/nvm.sh" ]; then
+            # shellcheck disable=SC1091
+            . "${NVM_DIR}/nvm.sh"
+          fi
+
+          echo "=== Deploying ${PM2_APP_NAME} in ${APP_DIR} as $(whoami) ==="
+          echo "Node: $(node -v) | npm: $(npm -v) | pm2: $(pm2 -v)"
+
+          if [ ! -d "${APP_DIR}/.git" ]; then
+            echo "ERROR: Git repository not found at ${APP_DIR}"
+            exit 1
+          fi
+
+          git config --global --add safe.directory "${APP_DIR}"
+          cd "${APP_DIR}"
+
+          echo "=== [1/5] Pull latest main (preserving .env & uploads) ==="
+          git fetch origin main
+          git reset --hard origin/main
+
+          echo "=== [2/5] Install dependencies ==="
+          if [ -f package-lock.json ]; then
+            npm ci || npm install
+          else
+            npm install
+          fi
+
+          echo "=== [3/5] Prisma migrate deploy & client generate ==="
+          if [ -f prisma7.config.ts ]; then
+            npx prisma migrate deploy --config prisma7.config.ts
+            npx prisma generate --config prisma7.config.ts
+          else
+            npm run db:prod:sync
+          fi
+
+          echo "=== [4/5] Build NestJS backend ==="
+          npm run build
+          if [ ! -f dist/src/main.js ]; then
+            echo "ERROR: Build did not produce dist/src/main.js"
+            exit 1
+          fi
+
+          echo "=== [5/5] Restart PM2 & verify ==="
+          if pm2 describe "${PM2_APP_NAME}" >/dev/null 2>&1; then
+            pm2 restart "${PM2_APP_NAME}" --update-env
+          else
+            pm2 start dist/src/main.js --name "${PM2_APP_NAME}"
+          fi
+          pm2 save
+          pm2 describe "${PM2_APP_NAME}"
+
+          APP_PORT="3105"
+          if [ -f .env ]; then
+            ENV_PORT="$(grep -E '^[[:space:]]*PORT=' .env | tail -n 1 | cut -d '=' -f 2- | tr -d "\"'[:space:]\r" || true)"
+            if [ -n "${ENV_PORT}" ]; then
+              APP_PORT="${ENV_PORT}"
+            fi
+          fi
+
+          echo "=== Health check: http://127.0.0.1:${APP_PORT}/api/v1/dubbing/health ==="
+          HEALTH_OK=0
+          for attempt in 1 2 3 4 5; do
+            if curl -fsS --max-time 5 "http://127.0.0.1:${APP_PORT}/api/v1/dubbing/health" >/dev/null; then
+              HEALTH_OK=1
+              echo "Health check passed on attempt ${attempt}."
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "${HEALTH_OK}" -ne 1 ]; then
+            echo "WARNING: Health check did not return 200 within 10s; showing recent PM2 logs:"
+            pm2 logs "${PM2_APP_NAME}" --lines 30 --nostream || true
+            exit 1
+          fi
+          EOF
+
+          REMOTE_APP_DIR=$(printf '%q' "${APP_DIR}")
+          REMOTE_PM2_NAME=$(printf '%q' "${PM2_APP_NAME}")
+
+          ssh \
+            -i "$HOME/.ssh/deploy_key" \
+            -p "${SSH_PORT}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=6 \
+            "${SSH_USER}@${SSH_HOST}" \
+            "if [ \"\$(id -u)\" -ne 0 ]; then exec sudo -H env APP_DIR=${REMOTE_APP_DIR} PM2_APP_NAME=${REMOTE_PM2_NAME} bash -s; else exec env APP_DIR=${REMOTE_APP_DIR} PM2_APP_NAME=${REMOTE_PM2_NAME} bash -s; fi" \
+            < /tmp/deploy_tai_api.sh
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f "$HOME/.ssh/deploy_key" /tmp/deploy_tai_api.sh
