@@ -100,3 +100,36 @@ export function prepareManifest(
     );
   }
 }
+
+export function extractManifestMetadata(manifest: string): {
+  releaseDate?: string;
+  releaseNotes: string | null;
+} {
+  try {
+    const document = parseDocument(manifest);
+    if (document.errors.length) {
+      return { releaseNotes: null };
+    }
+    const parsed = document.toJS({ maxAliasCount: 0 }) as unknown;
+    if (!parsed || typeof parsed !== 'object') {
+      return { releaseNotes: null };
+    }
+    const record = parsed as Record<string, unknown>;
+
+    let releaseDate: string | undefined;
+    if (record.releaseDate instanceof Date && !Number.isNaN(record.releaseDate.getTime())) {
+      releaseDate = record.releaseDate.toISOString();
+    } else if (typeof record.releaseDate === 'string' && record.releaseDate.trim()) {
+      releaseDate = record.releaseDate.trim();
+    }
+
+    let releaseNotes: string | null = null;
+    if (typeof record.releaseNotes === 'string' && record.releaseNotes.trim()) {
+      releaseNotes = record.releaseNotes.trim();
+    }
+
+    return { releaseDate, releaseNotes };
+  } catch {
+    return { releaseNotes: null };
+  }
+}

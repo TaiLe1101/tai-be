@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   HttpException,
+  HttpStatus,
   Param,
   Res,
   VERSION_NEUTRAL,
@@ -18,12 +19,39 @@ import { AppReleasesService } from './app-releases.service';
 export class AppReleaseDownloadController {
   constructor(private readonly releases: AppReleasesService) {}
 
+  private applyPublicCors(response: Response) {
+    response.removeHeader('Access-Control-Allow-Credentials');
+    response.setHeader('Access-Control-Allow-Origin', '*');
+  }
+
   @Get('latest.yml')
   @ApiOperation({ summary: 'Manifest của phiên bản stable hiện tại' })
   async latest(@Res() response: Response) {
     const manifest = await this.releases.latestManifest();
+    this.applyPublicCors(response);
     response.setHeader('Cache-Control', 'no-store');
     response.type('text/yaml').send(manifest);
+  }
+
+  @Get('latest.json')
+  @ApiOperation({
+    summary: 'Metadata JSON của phiên bản stable hiện tại cho landing page',
+  })
+  async latestJson(@Res() response: Response) {
+    const metadata = await this.releases.latestPublicMetadata();
+    this.applyPublicCors(response);
+    response.setHeader('Cache-Control', 'no-store');
+    response.json(metadata);
+  }
+
+  @Get('latest/download')
+  @ApiOperation({
+    summary: 'Chuyển hướng 302 tới bộ cài của phiên bản stable hiện tại',
+  })
+  async latestDownload(@Res() response: Response) {
+    const downloadUrl = await this.releases.latestDownloadUrl();
+    response.setHeader('Cache-Control', 'no-store');
+    response.redirect(HttpStatus.FOUND, downloadUrl);
   }
 
   @Get(':version/:filename')

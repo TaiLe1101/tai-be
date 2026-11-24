@@ -19,7 +19,7 @@ import {
   AppReleaseFiles,
 } from './app-release-upload';
 import { AppReleaseQueryDTO } from './dto/app-release-query.dto';
-import { prepareManifest } from './release-manifest';
+import { extractManifestMetadata, prepareManifest } from './release-manifest';
 
 @Injectable()
 export class AppReleasesService extends BaseService<
@@ -309,6 +309,35 @@ export class AppReleasesService extends BaseService<
     if (!channel?.release.publishedAt)
       throw new NotFoundException('Chưa có phiên bản được phát hành');
     return channel.release.manifest;
+  }
+
+  async latestPublicMetadata() {
+    const channel = await this.prisma.appReleaseChannel.findUnique({
+      where: { name: 'stable' },
+      include: { release: true },
+    });
+    const publishedAt = channel?.release.publishedAt;
+    if (!channel || !publishedAt)
+      throw new NotFoundException('Chưa có phiên bản được phát hành');
+    const release = channel.release;
+    const { releaseDate, releaseNotes } = extractManifestMetadata(
+      release.manifest,
+    );
+    return {
+      version: release.version,
+      filename: release.installerName,
+      path: `${release.version}/${release.installerName}`,
+      downloadUrl: `/uploads/app/release/${encodeURIComponent(release.version)}/${encodeURIComponent(release.installerName)}`,
+      fileSize: release.installerSize,
+      sha512: release.installerSha512,
+      releaseDate: releaseDate ?? publishedAt.toISOString(),
+      releaseNotes,
+    };
+  }
+
+  async latestDownloadUrl() {
+    const metadata = await this.latestPublicMetadata();
+    return metadata.downloadUrl;
   }
 
   async publicFile(version: string, filename: string) {
